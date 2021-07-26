@@ -11,10 +11,19 @@ import (
 	"io/ioutil"
 	"log"
 	"os"
+	"strings"
 	"time"
 
+	"github.com/chromedp/cdproto/cdp"
+	"github.com/chromedp/cdproto/network"
 	"github.com/chromedp/chromedp"
 )
+
+// var headers map[string]interface{} = map[string]interface{}{
+// 	`cookie`: `wr_gid=x; wr_vid=x; wr_skey=x; wr_pf=x; wr_rt=x; wr_localvid=x; wr_name=x; wr_avatar=x; wr_gender=x`
+// }
+
+const cookie string = `wr_gid=x; wr_vid=x; wr_skey=x; wr_pf=x; wr_rt=x; wr_localvid=x; wr_name=x; wr_avatar=x; wr_gender=x`
 
 const js_script = `
 function getScrollTop()
@@ -69,28 +78,113 @@ func main() {
 	taskCtx, cancel := chromedp.NewContext(allocCtx, chromedp.WithLogf(log.Printf))
 	defer cancel()
 
-	initBookPage("https://weread.qq.com/web/reader/64e32bf071fd5a9164ece6bk65132ca01b6512bd43d90e3", taskCtx)
-	ret := screenshotPage(taskCtx)
-	file, _ := os.Create("result.png")
-	png.Encode(file, ret)
-	// 翻页逻辑
-	// chromedp.Run(taskCtx,
-	// 	chromedp.Click(".readerFooter_button", chromedp.NodeVisible),
-	// )
+	getBook(taskCtx, "https://weread.qq.com/web/reader/64e32bf071fd5a9164ece6bk65132ca01b6512bd43d90e3", cookie)
+
+	// ret := screenshotPage(taskCtx)
+	// file, _ := os.Create("result.png")
+	// png.Encode(file, ret)
 
 	fmt.Println("正常结束")
 }
 
-func initBookPage(url string, ctx context.Context) {
+func getBook(ctx context.Context, url string, cookie string) {
+
 	var evalbuf []byte
-	chromedp.Run(ctx,
+	// var strbuf string
+	var pageCount int
+	cookie_arr := strings.Split(cookie, ";")
+	var cookies []string
+	for _, cookie := range cookie_arr {
+		cookietemp := strings.Split(cookie, "=")
+		for _, cookieitem := range cookietemp {
+			cookies = append(cookies, strings.TrimSpace(cookieitem))
+		}
+	}
+	log.Println(cookies)
+
+	// init
+	if err := chromedp.Run(ctx,
+		// network.Enable(),
+		// network.SetExtraHTTPHeaders(network.Headers(headers)),
+		chromedp.ActionFunc(func(ctx context.Context) error {
+			// create cookie expiration
+			expr := cdp.TimeSinceEpoch(time.Now().Add(180 * 24 * time.Hour))
+			// add cookies to chrome
+			for i := 0; i < len(cookies); i += 2 {
+				log.Println(cookies[i] + "=" + cookies[i+1])
+				err := network.SetCookie(cookies[i], cookies[i+1]).
+					WithExpires(&expr).
+					WithDomain(".qq.com").
+					WithHTTPOnly(true).
+					Do(ctx)
+				if err != nil {
+					return err
+				}
+			}
+			return nil
+		}),
 		chromedp.Navigate(url),
 		chromedp.Sleep(2*time.Second),
-		chromedp.Evaluate(`document.querySelector(".white").click()`, &evalbuf),
-		chromedp.Evaluate(`document.querySelector(".readerTopBar").remove()`, &evalbuf),
-		chromedp.Evaluate(`document.querySelector(".readerControls").remove()`, &evalbuf),
+		chromedp.Evaluate(`if (document.querySelector(".white")!=null){document.querySelector(".white").click()}`, &evalbuf),
+		chromedp.Evaluate(`document.querySelector(".readerTopBar").style="display:none"`, &evalbuf),
+		chromedp.Evaluate(`document.querySelector(".readerControls").style="display:none"`, &evalbuf),
 		chromedp.Evaluate(`document.querySelector(".readerFooter_button").style="display:none"`, &evalbuf),
+		chromedp.ActionFunc(func(ctx context.Context) error {
+			cookies, err := network.GetAllCookies().Do(ctx)
+			if err != nil {
+				return err
+			}
+
+			for i, cookie := range cookies {
+				log.Printf("chrome cookie %d: %+v", i, cookie)
+			}
+
+			return nil
+		}),
+	); err != nil {
+		log.Fatal(err)
+	}
+
+	// get pageCount
+	chromedp.Run(ctx,
+		chromedp.Evaluate(`if (document.querySelector(".white")!=null){document.querySelector(".white").click()}`, &evalbuf),
+		chromedp.Evaluate(`document.querySelector(".readerTopBar").style="display:none"`, &evalbuf),
+		chromedp.Evaluate(`document.querySelector(".readerControls").style="display:none"`, &evalbuf),
+		chromedp.Evaluate(`document.querySelector(".readerFooter_button").style="display:none"`, &evalbuf),
+		chromedp.Evaluate(`document.querySelector(".readerCatalog_list").childElementCount`, &pageCount),
 	)
+	log.Println("page count is:", pageCount)
+
+	// get page
+	for i := 1; i < pageCount+1; i++ {
+		fmt.Println(fmt.Sprint(`document.querySelector(".readerCatalog_list>li:nth-of-type(`, i, `)>div").click()`))
+		// subctx, _ := context.WithCancel(ctx)
+		// 选择章节并且初始化页面
+		if err := chromedp.Run(ctx,
+			chromedp.Evaluate(`document.querySelector(".catalog").click()`, &evalbuf),
+			chromedp.Click(fmt.Sprint(".readerCatalog_list>li:nth-of-type(", i, ")"), chromedp.NodeNotVisible),
+			chromedp.Sleep(300*time.Millisecond),
+			chromedp.Evaluate(`if(document.querySelector(".readerTopBar")!=null){document.querySelector(".readerTopBar").style="display:none"}`, &evalbuf),
+			chromedp.Evaluate(`document.querySelector(".readerControls").style="display:none"`, &evalbuf),
+			chromedp.Evaluate(`document.querySelector(".readerFooter_button").style="display:none"`, &evalbuf),
+			// chromedp.ActionFunc(func(ctx context.Context) error {
+			// 	ret := screenshotPage(ctx)
+			// 	file, _ := os.Create(fmt.Sprint("book-", i, ".png"))
+			// 	png.Encode(file, ret)
+			// 	// cancel()
+			// 	return nil
+			// }),
+		); err != nil {
+			log.Fatal(err)
+		}
+		// 等待页面加载完成, 这里后续可以优化为 Dom 事件通知
+		// time.Sleep(1 * time.Second)
+		// 截图和保存
+		ret := screenshotPage(ctx)
+		file, _ := os.Create(fmt.Sprint("book-", i, ".png"))
+		log.Println(fmt.Sprint("save book-", i, ".png"))
+		png.Encode(file, ret)
+	}
 }
 
 func screenshotPage(ctx context.Context) image.Image {
@@ -101,37 +195,35 @@ func screenshotPage(ctx context.Context) image.Image {
 	var scroll_height int = 0
 	var imageFiles []string
 
+	log.Println("开始截图...")
 	dir, err := ioutil.TempDir("", "page")
+	// defer os.RemoveAll(dir)
 	fmt.Println(dir)
 	if err != nil {
 		log.Fatal(err)
 	}
 
 	for !boolbuf {
-		chromedp.Run(ctx,
+		if err := chromedp.Run(ctx,
 			chromedp.Evaluate(js_script, &boolbuf),
 			chromedp.Evaluate(fmt.Sprint(`window.scrollTo(0,`, scroll_height, `)`), &evalbuf),
 			chromedp.Evaluate(`document.body.clientHeight `, &height),
-			chromedp.Sleep(100*time.Millisecond),
-		)
-
-		scroll_height += height
-
-		if err := chromedp.Run(
-			ctx,
-			chromedp.Evaluate(fmt.Sprint(`window.scrollTo(0,`, scroll_height, `)`), &evalbuf),
 			chromedp.Screenshot(`.app_content`, &buf),
+			chromedp.Sleep(100*time.Millisecond),
 		); err != nil {
 			log.Fatal(err)
 		}
-		fmt.Println(fmt.Sprint(dir, "-", scroll_height, ".png"))
-		imageFiles = append(imageFiles, fmt.Sprint(dir, "-", scroll_height, ".png"))
-		if err := ioutil.WriteFile(fmt.Sprint(dir, "-", scroll_height, ".png"), buf, 0o644); err != nil {
+
+		scroll_height += height
+
+		fmt.Println(fmt.Sprint(dir, "/", scroll_height, ".png"))
+		imageFiles = append(imageFiles, fmt.Sprint(dir, "/", scroll_height, ".png"))
+		if err := ioutil.WriteFile(fmt.Sprint(dir, "/", scroll_height, ".png"), buf, 0o644); err != nil {
 			log.Fatal(err)
 		}
 	}
 
-	fmt.Println(imageFiles)
+	log.Println(imageFiles)
 	return mergeImages(imageFiles)
 }
 
