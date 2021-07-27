@@ -22,6 +22,8 @@ import (
 // var headers map[string]interface{} = map[string]interface{}{
 // 	`cookie`: `wr_gid=x; wr_vid=x; wr_skey=x; wr_pf=x; wr_rt=x; wr_localvid=x; wr_name=x; wr_avatar=x; wr_gender=x`
 // }
+const wereaderCategoryUrl string = `https://weread.qq.com/web/category/`
+const wereaderUrl string = `https://weread.qq.com/`
 
 const cookie string = `wr_gid=x; wr_vid=x; wr_skey=x; wr_pf=x; wr_rt=x; wr_localvid=x; wr_name=x; wr_avatar=x; wr_gender=x`
 
@@ -68,13 +70,99 @@ func main() {
 	defer cancel1()
 	defer cancel2()
 
-	getBook(taskCtx, "https://weread.qq.com/web/reader/64e32bf071fd5a9164ece6bk65132ca01b6512bd43d90e3", cookie)
+	cookies := cookiesStrToArr(cookie)
+	log.Println(cookies)
+	setCookies(taskCtx, wereaderUrl, cookies)
+	category := getCategory(taskCtx)
+	fmt.Println(category)
+	x := getBookUrlsFromCategory(taskCtx, "计算机榜")
+	fmt.Println(x)
+	// getBook(taskCtx, "https://weread.qq.com/web/reader/64e32bf071fd5a9164ece6bk65132ca01b6512bd43d90e3", cookie)
 
 	// ret := screenshotPage(taskCtx)
 	// file, _ := os.Create("result.png")
 	// png.Encode(file, ret)
 
 	fmt.Println("正常结束")
+}
+
+func getCategory(ctx context.Context) map[string]string {
+	var category map[string]string
+	if err := chromedp.Run(ctx,
+		chromedp.Navigate(wereaderCategoryUrl),
+		chromedp.Evaluate(`q={};document.querySelectorAll(".ranking_list>li>a").forEach(a=>{q[a.text.replace(/\s*/g,"")]=a.href});q`, &category),
+	); err != nil {
+		log.Fatal(err)
+	}
+	return category
+}
+
+func getBookUrlsFromCategory(ctx context.Context, category string) map[string]map[string]string {
+	var evalbuf []byte
+	var subCategoryBookUrls map[string]map[string]string = make(map[string]map[string]string)
+	var categoryUrl string
+	var subCategoryCount int
+	var bookUrlsCount int
+
+	categoryUrl, isOk := getCategory(ctx)[category]
+	if !isOk {
+		log.Fatal("category", category, "not found!")
+	}
+
+	if err := chromedp.Run(ctx,
+		chromedp.Navigate(categoryUrl),
+		chromedp.Evaluate(`document.querySelector(".ranking_page_header_categroy_container").childElementCount`, &subCategoryCount),
+	); err != nil {
+		log.Fatal(err)
+	}
+	log.Println(subCategoryCount, "book URLs in the", category, "category")
+
+	// 遍历获取每个子类别中的图书URL
+	for i := 1; i < subCategoryCount+1; i++ {
+		var subCategoryName string
+		log.Println(fmt.Sprint(`document.querySelector(".ranking_page_header_categroy_container>div:nth-of-type(`, i, `)").click()`))
+		if err := chromedp.Run(ctx,
+			chromedp.Evaluate(fmt.Sprint(`document.querySelector(".ranking_page_header_categroy_container>div:nth-of-type(`, i, `)").textContent`), &subCategoryName),
+			chromedp.Evaluate(fmt.Sprint(`document.querySelector(".ranking_page_header_categroy_container>div:nth-of-type(`, i, `)").click()`), &evalbuf),
+			chromedp.Sleep(300*time.Millisecond),
+		); err != nil {
+			log.Fatal(err)
+		}
+		// 在这个子类别下一直翻页获取个数
+		tempBookUrlsCount := 0
+		retryCount := 0
+		for {
+			tempBookUrlsCount = bookUrlsCount
+			if err := chromedp.Run(ctx,
+				chromedp.Evaluate(fmt.Sprint(`window.scrollTo(0,`, bookUrlsCount*10000000000, `)`), &evalbuf),
+				chromedp.Evaluate(`document.querySelector(".ranking_content_bookList").childElementCount `, &bookUrlsCount),
+				chromedp.Sleep(300*time.Millisecond),
+			); err != nil {
+				log.Fatal(err)
+			}
+			log.Println(bookUrlsCount, tempBookUrlsCount)
+			if bookUrlsCount == tempBookUrlsCount {
+				retryCount++
+				if retryCount == 3 {
+					break
+				}
+			}
+		}
+		var bookUrls map[string]string
+		// 翻页直到动态加载完所有 li 后，获取这个子类别所有图书的url
+		if err := chromedp.Run(ctx,
+			chromedp.Evaluate(`m={};document.querySelectorAll(".ranking_content_bookList>li").forEach(q=>{m[q.querySelector('.wr_bookList_item_title').textContent]=q.querySelector('a').href});m`, &bookUrls),
+			chromedp.Evaluate(`document.querySelector(".ranking_content_bookList").childElementCount `, &bookUrlsCount),
+			chromedp.Sleep(300*time.Millisecond),
+		); err != nil {
+			log.Fatal(err)
+		}
+		log.Println(subCategoryName, "子类收集完成数量为:", len(bookUrls))
+		log.Println(bookUrls)
+		subCategoryBookUrls[subCategoryName] = bookUrls
+	}
+
+	return subCategoryBookUrls
 }
 
 func newBrowerCtx() (context.Context, context.Context, context.CancelFunc, context.CancelFunc) {
@@ -105,7 +193,6 @@ func cookiesStrToArr(cookie string) []string {
 }
 
 func setCookies(ctx context.Context, url string, cookies []string) {
-	var evalbuf []byte
 	if err := chromedp.Run(ctx,
 		// network.Enable(),
 		// network.SetExtraHTTPHeaders(network.Headers(headers)),
@@ -127,11 +214,6 @@ func setCookies(ctx context.Context, url string, cookies []string) {
 			return nil
 		}),
 		chromedp.Navigate(url),
-		chromedp.Sleep(2*time.Second),
-		chromedp.Evaluate(`if (document.querySelector(".white")!=null){document.querySelector(".white").click()}`, &evalbuf),
-		chromedp.Evaluate(`document.querySelector(".readerTopBar").style="display:none"`, &evalbuf),
-		chromedp.Evaluate(`document.querySelector(".readerControls").style="display:none"`, &evalbuf),
-		chromedp.Evaluate(`document.querySelector(".readerFooter_button").style="display:none"`, &evalbuf),
 		chromedp.ActionFunc(func(ctx context.Context) error {
 			cookies, err := network.GetAllCookies().Do(ctx)
 			if err != nil {
