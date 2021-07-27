@@ -64,19 +64,9 @@ getScrollTop() + getWindowHeight() == getScrollHeight()
 func main() {
 
 	// get custom opts and ctx
-	dir, err := ioutil.TempDir("", "chromedp-example")
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer os.RemoveAll(dir)
-	opts := append(chromedp.DefaultExecAllocatorOptions[3:],
-		chromedp.DisableGPU,
-		chromedp.UserDataDir(dir),
-	)
-	allocCtx, cancel := chromedp.NewExecAllocator(context.Background(), opts...)
-	defer cancel()
-	taskCtx, cancel := chromedp.NewContext(allocCtx, chromedp.WithLogf(log.Printf))
-	defer cancel()
+	_, taskCtx, cancel1, cancel2 := newBrowerCtx()
+	defer cancel1()
+	defer cancel2()
 
 	getBook(taskCtx, "https://weread.qq.com/web/reader/64e32bf071fd5a9164ece6bk65132ca01b6512bd43d90e3", cookie)
 
@@ -87,11 +77,22 @@ func main() {
 	fmt.Println("正常结束")
 }
 
-func getBook(ctx context.Context, url string, cookie string) {
+func newBrowerCtx() (context.Context, context.Context, context.CancelFunc, context.CancelFunc) {
+	// dir, err := ioutil.TempDir("", "chromedp-example")
+	// if err != nil {
+	// 	log.Fatal(err)
+	// }
+	// defer os.RemoveAll(dir)
+	opts := append(chromedp.DefaultExecAllocatorOptions[3:],
+		chromedp.DisableGPU,
+		// chromedp.UserDataDir(dir),
+	)
+	allocCtx, callocCancel := chromedp.NewExecAllocator(context.Background(), opts...)
+	tabCtx, tabCancel := chromedp.NewContext(allocCtx, chromedp.WithLogf(log.Printf))
+	return allocCtx, tabCtx, callocCancel, tabCancel
+}
 
-	var evalbuf []byte
-	// var strbuf string
-	var pageCount int
+func cookiesStrToArr(cookie string) []string {
 	cookie_arr := strings.Split(cookie, ";")
 	var cookies []string
 	for _, cookie := range cookie_arr {
@@ -100,9 +101,11 @@ func getBook(ctx context.Context, url string, cookie string) {
 			cookies = append(cookies, strings.TrimSpace(cookieitem))
 		}
 	}
-	log.Println(cookies)
+	return cookies
+}
 
-	// init
+func setCookies(ctx context.Context, url string, cookies []string) {
+	var evalbuf []byte
 	if err := chromedp.Run(ctx,
 		// network.Enable(),
 		// network.SetExtraHTTPHeaders(network.Headers(headers)),
@@ -144,16 +147,37 @@ func getBook(ctx context.Context, url string, cookie string) {
 	); err != nil {
 		log.Fatal(err)
 	}
+}
 
+func getPageCount(ctx context.Context) int {
+	var evalbuf []byte
+	var pageCount int
 	// get pageCount
-	chromedp.Run(ctx,
+	if err := chromedp.Run(ctx,
 		chromedp.Evaluate(`if (document.querySelector(".white")!=null){document.querySelector(".white").click()}`, &evalbuf),
 		chromedp.Evaluate(`document.querySelector(".readerTopBar").style="display:none"`, &evalbuf),
 		chromedp.Evaluate(`document.querySelector(".readerControls").style="display:none"`, &evalbuf),
 		chromedp.Evaluate(`document.querySelector(".readerFooter_button").style="display:none"`, &evalbuf),
 		chromedp.Evaluate(`document.querySelector(".readerCatalog_list").childElementCount`, &pageCount),
-	)
+	); err != nil {
+		log.Fatal(err)
+	}
 	log.Println("page count is:", pageCount)
+	return pageCount
+}
+
+func getBook(ctx context.Context, url string, cookie string) {
+
+	var evalbuf []byte
+	// var strbuf string
+	cookies := cookiesStrToArr(cookie)
+	log.Println(cookies)
+
+	// init
+	setCookies(ctx, url, cookies)
+
+	// get pageCount
+	pageCount := getPageCount(ctx)
 
 	// get page
 	for i := 1; i < pageCount+1; i++ {
@@ -163,17 +187,10 @@ func getBook(ctx context.Context, url string, cookie string) {
 		if err := chromedp.Run(ctx,
 			chromedp.Evaluate(`document.querySelector(".catalog").click()`, &evalbuf),
 			chromedp.Click(fmt.Sprint(".readerCatalog_list>li:nth-of-type(", i, ")"), chromedp.NodeNotVisible),
-			chromedp.Sleep(300*time.Millisecond),
+			chromedp.Sleep(900*time.Millisecond),
 			chromedp.Evaluate(`if(document.querySelector(".readerTopBar")!=null){document.querySelector(".readerTopBar").style="display:none"}`, &evalbuf),
 			chromedp.Evaluate(`document.querySelector(".readerControls").style="display:none"`, &evalbuf),
 			chromedp.Evaluate(`document.querySelector(".readerFooter_button").style="display:none"`, &evalbuf),
-			// chromedp.ActionFunc(func(ctx context.Context) error {
-			// 	ret := screenshotPage(ctx)
-			// 	file, _ := os.Create(fmt.Sprint("book-", i, ".png"))
-			// 	png.Encode(file, ret)
-			// 	// cancel()
-			// 	return nil
-			// }),
 		); err != nil {
 			log.Fatal(err)
 		}
@@ -209,7 +226,7 @@ func screenshotPage(ctx context.Context) image.Image {
 			chromedp.Evaluate(fmt.Sprint(`window.scrollTo(0,`, scroll_height, `)`), &evalbuf),
 			chromedp.Evaluate(`document.body.clientHeight `, &height),
 			chromedp.Screenshot(`.app_content`, &buf),
-			chromedp.Sleep(100*time.Millisecond),
+			chromedp.Sleep(500*time.Millisecond),
 		); err != nil {
 			log.Fatal(err)
 		}
