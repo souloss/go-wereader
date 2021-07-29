@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"image"
 	"image/color"
@@ -11,6 +12,8 @@ import (
 	"io/ioutil"
 	"log"
 	"os"
+	"reflect"
+	"regexp"
 	"strings"
 	"time"
 
@@ -19,15 +22,16 @@ import (
 	"github.com/chromedp/chromedp"
 )
 
+// 设置 headers 的方式在这一层次不好使...
 // var headers map[string]interface{} = map[string]interface{}{
 // 	`cookie`: `wr_gid=x; wr_vid=x; wr_skey=x; wr_pf=x; wr_rt=x; wr_localvid=x; wr_name=x; wr_avatar=x; wr_gender=x`
 // }
+const cookie string = `wr_gid=x; wr_vid=x; wr_skey=x; wr_pf=x; wr_rt=x; wr_localvid=x; wr_name=x; wr_avatar=x; wr_gender=x`
+
 const wereaderCategoryUrl string = `https://weread.qq.com/web/category/`
 const wereaderUrl string = `https://weread.qq.com/`
 
-const cookie string = `wr_gid=x; wr_vid=x; wr_skey=x; wr_pf=x; wr_rt=x; wr_localvid=x; wr_name=x; wr_avatar=x; wr_gender=x`
-
-const js_script = `
+const isScrollTailScript = `
 function getScrollTop()
 {
 　　var scrollTop = 0, bodyScrollTop = 0, documentScrollTop = 0;
@@ -66,7 +70,7 @@ getScrollTop() + getWindowHeight() == getScrollHeight()
 func main() {
 
 	// get custom opts and ctx
-	_, taskCtx, cancel1, cancel2 := newBrowerCtx()
+	_, taskCtx, cancel1, cancel2 := NewBrowerCtx(false)
 	defer cancel1()
 	defer cancel2()
 
@@ -83,7 +87,7 @@ func main() {
 	// file, _ := os.Create("result.png")
 	// png.Encode(file, ret)
 
-	fmt.Println("正常结束")
+	log.Println("Perfect Ending !")
 }
 
 func getCategory(ctx context.Context) map[string]string {
@@ -97,6 +101,8 @@ func getCategory(ctx context.Context) map[string]string {
 	return category
 }
 
+// 从分类获取书本的url
+// 返回值格式类似 {子分类1:{书本名1:url1},子分类2:{书本2:url2}}
 func getBookUrlsFromCategory(ctx context.Context, category string) map[string]map[string]string {
 	var evalbuf []byte
 	var subCategoryBookUrls map[string]map[string]string = make(map[string]map[string]string)
@@ -124,7 +130,6 @@ func getBookUrlsFromCategory(ctx context.Context, category string) map[string]ma
 		if err := chromedp.Run(ctx,
 			chromedp.Evaluate(fmt.Sprint(`document.querySelector(".ranking_page_header_categroy_container>div:nth-of-type(`, i, `)").textContent`), &subCategoryName),
 			chromedp.Evaluate(fmt.Sprint(`document.querySelector(".ranking_page_header_categroy_container>div:nth-of-type(`, i, `)").click()`), &evalbuf),
-			chromedp.Sleep(300*time.Millisecond),
 		); err != nil {
 			log.Fatal(err)
 		}
@@ -134,13 +139,16 @@ func getBookUrlsFromCategory(ctx context.Context, category string) map[string]ma
 		for {
 			tempBookUrlsCount = bookUrlsCount
 			if err := chromedp.Run(ctx,
+				// 每次滑动的长度不一样更容易触发异步加载
 				chromedp.Evaluate(fmt.Sprint(`window.scrollTo(0,`, bookUrlsCount*10000000000, `)`), &evalbuf),
+				chromedp.Query(`.ranking_content_bookList`, chromedp.NodeVisible),
 				chromedp.Evaluate(`document.querySelector(".ranking_content_bookList").childElementCount `, &bookUrlsCount),
-				chromedp.Sleep(300*time.Millisecond),
+				// 这里必须等待书本项进行异步加载
+				chromedp.Sleep(200*time.Millisecond),
 			); err != nil {
 				log.Fatal(err)
 			}
-			log.Println(bookUrlsCount, tempBookUrlsCount)
+			log.Println(fmt.Sprint("目前异步加载的书本数量", bookUrlsCount, "; 上次异步加载的书本数量", tempBookUrlsCount))
 			if bookUrlsCount == tempBookUrlsCount {
 				retryCount++
 				if retryCount == 3 {
@@ -165,21 +173,27 @@ func getBookUrlsFromCategory(ctx context.Context, category string) map[string]ma
 	return subCategoryBookUrls
 }
 
-func newBrowerCtx() (context.Context, context.Context, context.CancelFunc, context.CancelFunc) {
-	// dir, err := ioutil.TempDir("", "chromedp-example")
-	// if err != nil {
-	// 	log.Fatal(err)
-	// }
-	// defer os.RemoveAll(dir)
-	opts := append(chromedp.DefaultExecAllocatorOptions[3:],
+// 获取一个浏览器实例和标签页的实例的 Context 和 Cancel
+func NewBrowerCtx(headless bool) (context.Context, context.Context, context.CancelFunc, context.CancelFunc) {
+	defaultOpts := append(chromedp.DefaultExecAllocatorOptions[:],
 		chromedp.DisableGPU,
-		// chromedp.UserDataDir(dir),
 	)
+	opts := []chromedp.ExecAllocatorOption{}
+	if !headless {
+		for _, opt := range defaultOpts {
+			if reflect.ValueOf(opt).Pointer() != reflect.ValueOf(chromedp.Headless).Pointer() {
+				opts = append(opts, opt)
+			}
+		}
+	} else {
+		opts = defaultOpts
+	}
 	allocCtx, callocCancel := chromedp.NewExecAllocator(context.Background(), opts...)
 	tabCtx, tabCancel := chromedp.NewContext(allocCtx, chromedp.WithLogf(log.Printf))
 	return allocCtx, tabCtx, callocCancel, tabCancel
 }
 
+// 将 cookies 字符串转换为形如 [key1,value1,key2,value2,key3,value3] 的 cookie 数组
 func cookiesStrToArr(cookie string) []string {
 	cookie_arr := strings.Split(cookie, ";")
 	var cookies []string
@@ -192,7 +206,25 @@ func cookiesStrToArr(cookie string) []string {
 	return cookies
 }
 
+// 获取 url 的 domain
+// url format: protocal://domain:port/path/
+func getUrlDomain(url string) (string, error) {
+	urlRegexp := regexp.MustCompile(`^https?://([\w.]*(:\d+)?)//?.*`)
+	subString := urlRegexp.FindStringSubmatch(url)
+	if len(subString) > 1 {
+		return subString[1], nil
+	} else {
+		return "", errors.New(fmt.Sprint("url ", url, "not has domain!"))
+	}
+}
+
+// 在浏览器标签页中为url设置cookies
+// 注意,这个方法会将这个标签页实例的导航栏切换到这个url
 func setCookies(ctx context.Context, url string, cookies []string) {
+	domain, err := getUrlDomain(url)
+	if err != nil {
+		log.Fatal(err)
+	}
 	if err := chromedp.Run(ctx,
 		// network.Enable(),
 		// network.SetExtraHTTPHeaders(network.Headers(headers)),
@@ -204,7 +236,7 @@ func setCookies(ctx context.Context, url string, cookies []string) {
 				log.Println(cookies[i] + "=" + cookies[i+1])
 				err := network.SetCookie(cookies[i], cookies[i+1]).
 					WithExpires(&expr).
-					WithDomain(".qq.com").
+					WithDomain(domain).
 					WithHTTPOnly(true).
 					Do(ctx)
 				if err != nil {
@@ -219,11 +251,9 @@ func setCookies(ctx context.Context, url string, cookies []string) {
 			if err != nil {
 				return err
 			}
-
 			for i, cookie := range cookies {
 				log.Printf("chrome cookie %d: %+v", i, cookie)
 			}
-
 			return nil
 		}),
 	); err != nil {
@@ -231,6 +261,7 @@ func setCookies(ctx context.Context, url string, cookies []string) {
 	}
 }
 
+// 获取该书籍页数
 func getPageCount(ctx context.Context) int {
 	var evalbuf []byte
 	var pageCount int
@@ -248,6 +279,7 @@ func getPageCount(ctx context.Context) int {
 	return pageCount
 }
 
+// 获取书籍
 func getBook(ctx context.Context, url string, cookie string) {
 
 	var evalbuf []byte
@@ -286,6 +318,7 @@ func getBook(ctx context.Context, url string, cookie string) {
 	}
 }
 
+// 以页面高度(document.body.clientHeight)为单位滑动滑条并截图存放到临时目录，每次等待 500ms 加载内容，最后将这些图片覆盖合并并返回
 func screenshotPage(ctx context.Context) image.Image {
 
 	var buf, evalbuf []byte
@@ -296,7 +329,7 @@ func screenshotPage(ctx context.Context) image.Image {
 
 	log.Println("开始截图...")
 	dir, err := ioutil.TempDir("", "page")
-	// defer os.RemoveAll(dir)
+	defer os.RemoveAll(dir)
 	fmt.Println(dir)
 	if err != nil {
 		log.Fatal(err)
@@ -304,7 +337,7 @@ func screenshotPage(ctx context.Context) image.Image {
 
 	for !boolbuf {
 		if err := chromedp.Run(ctx,
-			chromedp.Evaluate(js_script, &boolbuf),
+			chromedp.Evaluate(isScrollTailScript, &boolbuf),
 			chromedp.Evaluate(fmt.Sprint(`window.scrollTo(0,`, scroll_height, `)`), &evalbuf),
 			chromedp.Evaluate(`document.body.clientHeight `, &height),
 			chromedp.Screenshot(`.app_content`, &buf),
@@ -326,15 +359,20 @@ func screenshotPage(ctx context.Context) image.Image {
 	return mergeImages(imageFiles)
 }
 
+// 图片合并，填充所有白色区域
 func mergeImages(imgs []string) image.Image {
 
+	// 白色的 NRGBA 表示
 	white := color.NRGBA{255, 255, 255, 255}
-
-	newimgFile, err := os.Open(imgs[0])
+	// 以第一张图片的大小为基准创建纯白色的 NRGBA 图片
+	baseImg, err := os.Open(imgs[0])
 	if err != nil {
 		log.Fatalf("Failed to open %s", err)
 	}
-	newimg, _ := png.Decode(newimgFile)
+	newimg, err := png.Decode(baseImg)
+	if err != nil {
+		log.Fatalf("Failed to Decode %s", err)
+	}
 	newRgba := image.NewNRGBA(newimg.Bounds())
 	for w := 0; w < newimg.Bounds().Dx(); w++ {
 		for h := 0; h < newimg.Bounds().Dy(); h++ {
@@ -342,6 +380,7 @@ func mergeImages(imgs []string) image.Image {
 		}
 	}
 
+	// 遍历每张图片的每个点，若新创建的 NRGBA 图的该点为空白则进行填充
 	for _, img := range imgs {
 		imgItem, err := os.Open(img)
 		if err != nil {
