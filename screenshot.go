@@ -4,16 +4,15 @@ package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"image"
 	"image/color"
 	"image/png"
 	"io/ioutil"
 	"log"
+	"net/url"
 	"os"
 	"reflect"
-	"regexp"
 	"strings"
 	"time"
 
@@ -70,24 +69,62 @@ getScrollTop() + getWindowHeight() == getScrollHeight()
 func main() {
 
 	// get custom opts and ctx
-	_, taskCtx, cancel1, cancel2 := NewBrowerCtx(false)
+	_, taskCtx, cancel1, cancel2 := NewBrowerCtx(true)
 	defer cancel1()
 	defer cancel2()
 
 	cookies := cookiesStrToArr(cookie)
 	log.Println(cookies)
 	setCookies(taskCtx, wereaderUrl, cookies)
-	category := getCategory(taskCtx)
-	fmt.Println(category)
-	x := getBookUrlsFromCategory(taskCtx, "计算机榜")
-	fmt.Println(x)
-	// getBook(taskCtx, "https://weread.qq.com/web/reader/64e32bf071fd5a9164ece6bk65132ca01b6512bd43d90e3", cookie)
+	// category := getCategory(taskCtx)
+	// fmt.Println(category)
 
-	// ret := screenshotPage(taskCtx)
-	// file, _ := os.Create("result.png")
-	// png.Encode(file, ret)
+	const parallerCount int = 5
+	busy := make(chan struct{}, parallerCount)
+	tasks := make(chan string, parallerCount)
+	ok := make(chan struct{})
+	go producer(taskCtx, tasks, ok)
+
+	for w := 1; w <= parallerCount; w++ {
+		go worker(w, tasks, busy)
+	}
+
+	// 等待生产者完成
+	<-ok
+	// 等待消费者停止工作
+	for i := 1; i <= parallerCount; i++ {
+		<-busy
+	}
+
+	// getBook(taskCtx, "https://weread.qq.com/web/reader/ecb325e05cfecbecb37efec", cookie)
 
 	log.Println("Perfect Ending !")
+}
+
+func worker(id int, tasks chan string, busy chan struct{}) {
+	for j := range tasks {
+		busy <- struct{}{}
+		log.Println("worker", id, "started  job", j)
+
+		_, taskCtx, cancel1, cancel2 := NewBrowerCtx(true)
+		getBook(taskCtx, j, cookie)
+		cancel1()
+		cancel2()
+		log.Println("worker", id, "finished job", j)
+		<-busy
+	}
+}
+
+func producer(ctx context.Context, tasks chan string, ok chan struct{}) {
+	bookUrlsFromCategory := getBookUrlsFromCategory(ctx, "计算机榜")
+	for key, value := range bookUrlsFromCategory {
+		log.Println("开始生产 ", key, "类别的图书!")
+		for ikey, ivalue := range value {
+			log.Println("send", ikey, ",", ivalue, " => workerPools")
+			tasks <- ivalue
+		}
+	}
+	ok <- struct{}{}
 }
 
 func getCategory(ctx context.Context) map[string]string {
@@ -208,20 +245,20 @@ func cookiesStrToArr(cookie string) []string {
 
 // 获取 url 的 domain
 // url format: protocal://domain:port/path/
-func getUrlDomain(url string) (string, error) {
-	urlRegexp := regexp.MustCompile(`^https?://([\w.]*(:\d+)?)//?.*`)
-	subString := urlRegexp.FindStringSubmatch(url)
-	if len(subString) > 1 {
-		return subString[1], nil
-	} else {
-		return "", errors.New(fmt.Sprint("url ", url, "not has domain!"))
-	}
-}
+// func getUrlDomain(url string) (string, error) {
+// 	urlRegexp := regexp.MustCompile(`^https?://([\w.]*(:\d+)?)//?.*`)
+// 	subString := urlRegexp.FindStringSubmatch(url)
+// 	if len(subString) > 1 {
+// 		return subString[1], nil
+// 	} else {
+// 		return "", errors.New(fmt.Sprint("url ", url, "not has domain!"))
+// 	}
+// }
 
 // 在浏览器标签页中为url设置cookies
 // 注意,这个方法会将这个标签页实例的导航栏切换到这个url
-func setCookies(ctx context.Context, url string, cookies []string) {
-	domain, err := getUrlDomain(url)
+func setCookies(ctx context.Context, urlStr string, cookies []string) {
+	u, err := url.Parse(urlStr)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -236,7 +273,7 @@ func setCookies(ctx context.Context, url string, cookies []string) {
 				log.Println(cookies[i] + "=" + cookies[i+1])
 				err := network.SetCookie(cookies[i], cookies[i+1]).
 					WithExpires(&expr).
-					WithDomain(domain).
+					WithDomain(u.Host).
 					WithHTTPOnly(true).
 					Do(ctx)
 				if err != nil {
@@ -245,7 +282,7 @@ func setCookies(ctx context.Context, url string, cookies []string) {
 			}
 			return nil
 		}),
-		chromedp.Navigate(url),
+		chromedp.Navigate(urlStr),
 		chromedp.ActionFunc(func(ctx context.Context) error {
 			cookies, err := network.GetAllCookies().Do(ctx)
 			if err != nil {
@@ -263,14 +300,9 @@ func setCookies(ctx context.Context, url string, cookies []string) {
 
 // 获取该书籍页数
 func getPageCount(ctx context.Context) int {
-	var evalbuf []byte
 	var pageCount int
 	// get pageCount
 	if err := chromedp.Run(ctx,
-		chromedp.Evaluate(`if (document.querySelector(".white")!=null){document.querySelector(".white").click()}`, &evalbuf),
-		chromedp.Evaluate(`document.querySelector(".readerTopBar").style="display:none"`, &evalbuf),
-		chromedp.Evaluate(`document.querySelector(".readerControls").style="display:none"`, &evalbuf),
-		chromedp.Evaluate(`document.querySelector(".readerFooter_button").style="display:none"`, &evalbuf),
 		chromedp.Evaluate(`document.querySelector(".readerCatalog_list").childElementCount`, &pageCount),
 	); err != nil {
 		log.Fatal(err)
@@ -283,9 +315,15 @@ func getPageCount(ctx context.Context) int {
 func getBook(ctx context.Context, url string, cookie string) {
 
 	var evalbuf []byte
-	// var strbuf string
+	var title string
+	var keywords string
+	var description string
+	var ok bool
+
+	// .chapterItem_lock 判断
+	var lock bool
+
 	cookies := cookiesStrToArr(cookie)
-	log.Println(cookies)
 
 	// init
 	setCookies(ctx, url, cookies)
@@ -302,19 +340,32 @@ func getBook(ctx context.Context, url string, cookie string) {
 			chromedp.Evaluate(`document.querySelector(".catalog").click()`, &evalbuf),
 			chromedp.Click(fmt.Sprint(".readerCatalog_list>li:nth-of-type(", i, ")"), chromedp.NodeNotVisible),
 			chromedp.Sleep(900*time.Millisecond),
+			chromedp.Query(`.app_content`, chromedp.NodeVisible),
 			chromedp.Evaluate(`if(document.querySelector(".readerTopBar")!=null){document.querySelector(".readerTopBar").style="display:none"}`, &evalbuf),
-			chromedp.Evaluate(`document.querySelector(".readerControls").style="display:none"`, &evalbuf),
-			chromedp.Evaluate(`document.querySelector(".readerFooter_button").style="display:none"`, &evalbuf),
+			chromedp.Evaluate(`if(document.querySelector(".readerControls")!=null){document.querySelector(".readerControls").style="display:none"}`, &evalbuf),
+			chromedp.Evaluate(`if(document.querySelector(".readerFooter_button")!=null){document.querySelector(".readerFooter_button").style="display:none"}`, &evalbuf),
+			chromedp.Evaluate(`a=false;if(document.querySelector(".chapterItem_lock")){a=true};a`, &lock),
+			chromedp.Title(&title),
+			chromedp.AttributeValue(`meta[name=keywords]`, `content`, &keywords, &ok),
+			chromedp.AttributeValue(`meta[name=description]`, `content`, &description, &ok),
 		); err != nil {
 			log.Fatal(err)
 		}
-		// 等待页面加载完成, 这里后续可以优化为 Dom 事件通知
-		// time.Sleep(1 * time.Second)
-		// 截图和保存
-		ret := screenshotPage(ctx)
-		file, _ := os.Create(fmt.Sprint("book-", i, ".png"))
-		log.Println(fmt.Sprint("save book-", i, ".png"))
-		png.Encode(file, ret)
+
+		os.Mkdir(title, os.ModePerm)
+		metafile, _ := os.Create(fmt.Sprint(title, "/", "meta.txt"))
+		defer metafile.Close()
+		metafile.WriteString(fmt.Sprint(`{"title":"`, title, `","keywords":"`, keywords, `","description":"`, description, `"}`))
+
+		if lock {
+			return
+		} else {
+			// time.Sleep(1 * time.Second)
+			// 截图和保存
+			ret := screenshotPage(ctx)
+			file, _ := os.Create(fmt.Sprint(title, "/", i, ".png"))
+			png.Encode(file, ret)
+		}
 	}
 }
 
