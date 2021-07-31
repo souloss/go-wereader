@@ -13,6 +13,7 @@ import (
 	"log"
 	"net/url"
 	"os"
+	"path"
 	"reflect"
 	"strings"
 	"time"
@@ -108,7 +109,7 @@ func worker(id int, tasks chan string, idle chan struct{}) {
 		<-idle
 		log.Println("worker", id, "started  job", j)
 		_, taskCtx, cancel1, cancel2 := NewBrowerCtx(true)
-		GetBook(taskCtx, j, cookie)
+		GetBook(taskCtx, j, `D:\wereader-books`, cookie)
 		cancel1()
 		cancel2()
 		log.Println("worker", id, "finished job", j)
@@ -117,14 +118,12 @@ func worker(id int, tasks chan string, idle chan struct{}) {
 }
 
 func producer(ctx context.Context, tasks chan string, ok chan struct{}) {
-	bookUrlsFromCategory := getBookUrlsFromCategory(ctx, "计算机榜")
-	for key, value := range bookUrlsFromCategory {
-		log.Println("开始生产 ", key, "类别的图书!")
-		for ikey, ivalue := range value {
-			log.Println("send", ikey, ",", ivalue, " => workerPools")
-			tasks <- ivalue
-		}
-	}
+	const category string = "计算机榜"
+	log.Println("开始生产 ", category, "类别的图书!")
+	getBookUrlsFromCategory(ctx, "计算机榜", func(name string, url string) {
+		log.Println("send", name, ",", url, " => workerPools")
+		tasks <- url
+	})
 	ok <- struct{}{}
 }
 
@@ -141,9 +140,8 @@ func getCategory(ctx context.Context) map[string]string {
 
 // 从分类获取书本的url
 // 返回值格式类似 {子分类1:{书本名1:url1},子分类2:{书本2:url2}}
-func getBookUrlsFromCategory(ctx context.Context, category string) map[string]map[string]string {
+func getBookUrlsFromCategory(ctx context.Context, category string, process func(string, string)) {
 	var evalbuf []byte
-	var subCategoryBookUrls map[string]map[string]string = make(map[string]map[string]string)
 	var categoryUrl string
 	var subCategoryCount int
 	var bookUrlsCount int
@@ -203,12 +201,10 @@ func getBookUrlsFromCategory(ctx context.Context, category string) map[string]ma
 		); err != nil {
 			log.Panic(err)
 		}
-		log.Println(subCategoryName, "子类收集完成数量为:", len(bookUrls))
-		log.Println(bookUrls)
-		subCategoryBookUrls[subCategoryName] = bookUrls
+		for key, value := range bookUrls {
+			process(key, value)
+		}
 	}
-
-	return subCategoryBookUrls
 }
 
 // 获取一个浏览器实例和标签页的实例的 Context 和 Cancel
@@ -325,7 +321,7 @@ func getBookMeta(ctx context.Context) (string, string, string, int, bool) {
 }
 
 // 获取书籍
-func GetBook(ctx context.Context, url string, cookie string) error {
+func GetBook(ctx context.Context, url string, dir string, cookie string) error {
 
 	var evalbuf []byte
 	// .chapterItem_lock 判断
@@ -343,15 +339,17 @@ func GetBook(ctx context.Context, url string, cookie string) error {
 		log.Println(`书籍《`, title, `》还未解锁，进行跳过!`)
 		return nil
 	}
-	os.MkdirAll(title, os.ModePerm)
-	metafile, _ := os.Create(fmt.Sprint(title, `/`, `meta.txt`))
+	os.MkdirAll(dir, os.ModePerm)
+	bookPath := path.Join(dir, title)
+	os.Mkdir(bookPath, os.ModePerm)
+	metafile, _ := os.Create(fmt.Sprint(bookPath, `/`, `meta.json`))
 	defer metafile.Close()
-	metafile.WriteString(fmt.Sprint(`{"title":"`, title, `","keywords":"`, keywords, `","description":"`, description, `"}`))
+	metafile.WriteString(fmt.Sprint(`{"title":"`, title, `","keywords":"`, keywords, `","description":"`, description, `","pageCount":"`, pageCount, `","lock":"`, lock, `"}`))
 
 	// get page
 	for i := 1; i < pageCount+1; i++ {
 
-		if _, err := os.Stat(fmt.Sprint(title, `/`, i, `.png`)); err == nil {
+		if _, err := os.Stat(fmt.Sprint(bookPath, `/`, i, `.png`)); err == nil {
 			log.Println(`书籍 《`, title, `》 第`, i, `页已存在，进行跳过!`)
 			continue
 		} else {
@@ -360,7 +358,6 @@ func GetBook(ctx context.Context, url string, cookie string) error {
 		// 选择章节并且初始化页面
 	savepage:
 		if err := chromedp.Run(ctx,
-			// chromedp.Query(`.catalog`, chromedp.NodeVisible),
 			chromedp.Evaluate(`document.querySelector(".catalog").click()`, &evalbuf),
 			chromedp.Click(fmt.Sprint(".readerCatalog_list>li:nth-of-type(", i, ")"), chromedp.NodeNotVisible),
 			chromedp.Sleep(900*time.Millisecond),
@@ -370,6 +367,7 @@ func GetBook(ctx context.Context, url string, cookie string) error {
 			chromedp.Evaluate(`if(document.querySelector(".readerControls")!=null){document.querySelector(".readerControls").style="display:none"}`, &evalbuf),
 			chromedp.Evaluate(`if(document.querySelector(".readerFooter_button")!=null){document.querySelector(".readerFooter_button").style="display:none"}`, &evalbuf),
 		); err != nil {
+			// 章节选择出错重试
 			retry++
 			if retry >= retryMax {
 				return errors.New("选择章节超过最大重试次数")
@@ -380,14 +378,49 @@ func GetBook(ctx context.Context, url string, cookie string) error {
 		retry = 0
 		// 截图和保存
 		ret, err := screenshotPage(ctx)
+		// // 白色截图重试
+		// if !ImageValidity(ret) {
+		// 	log.Println("遇到白色截图! 进行刷新后重试...")
+		// 	// 刷新
+		// 	if err := chromedp.Run(ctx,
+		// 		chromedp.Reload(),
+		// 		chromedp.Sleep(900*time.Millisecond),
+		// 	); err != nil {
+		// 		log.Println(err)
+		// 	}
+		// 	retry++
+		// 	if retry >= retryMax {
+		// 		return errors.New("选择章节超过最大重试次数")
+		// 	} else {
+		// 		goto savepage
+		// 	}
+		// }
 		if err != nil {
 			return err
 		}
-		file, _ := os.Create(fmt.Sprint(title, `/`, i, `.png`))
+		file, _ := os.Create(fmt.Sprint(bookPath, `/`, i, `.png`))
 		png.Encode(file, ret)
 		file.Close()
 	}
 	return nil
+}
+
+func ImageValidity(img image.Image) bool {
+	// 白色的 NRGBA 表示
+	white := color.NRGBA{255, 255, 255, 255}
+	totalPointCount := img.Bounds().Dx() * img.Bounds().Dy()
+	whitePointCount := 0
+	for w := 0; w < img.Bounds().Dx(); w++ {
+		for h := 0; h < img.Bounds().Dy(); h++ {
+			r, g, b, a := img.At(w, h).RGBA()
+			current := color.NRGBA{uint8(r), uint8(g), uint8(b), uint8(a)}
+			if white == current {
+				whitePointCount++
+			}
+		}
+	}
+	// magic number
+	return float64(whitePointCount)/float64(totalPointCount) <= 0.931415926535
 }
 
 // 以页面高度(document.body.clientHeight)为单位滑动滑条并截图存放到临时目录，每次等待 500ms 加载内容，最后将这些图片覆盖合并并返回
@@ -439,13 +472,15 @@ func screenshotPage(ctx context.Context) (image.Image, error) {
 			scroll_height += height
 		}
 	}
-
-	image, err := mergeImages(imageFiles)
-	if err != nil {
-		// 这里可以处理合并错误的问题，再继续重新合并
-		return nil, err
+	if len(imageFiles) > 0 {
+		image, err := mergeImages(imageFiles)
+		if err != nil {
+			// 这里可以处理合并错误的问题，再继续重新合并
+			return nil, err
+		}
+		return image, nil
 	}
-	return image, nil
+	return nil, errors.New("the screenshot of the page imageFiles length is less than 0")
 }
 
 // 图片合并，填充所有白色区域
