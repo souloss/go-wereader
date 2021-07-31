@@ -360,9 +360,10 @@ func GetBook(ctx context.Context, url string, dir string, cookie string) error {
 		if err := chromedp.Run(ctx,
 			chromedp.Evaluate(`document.querySelector(".catalog").click()`, &evalbuf),
 			chromedp.Click(fmt.Sprint(".readerCatalog_list>li:nth-of-type(", i, ")"), chromedp.NodeNotVisible),
-			chromedp.Sleep(900*time.Millisecond),
+			chromedp.Sleep(1*time.Second),
 			chromedp.Query(`.app_content`, chromedp.NodeVisible),
 			chromedp.Evaluate(`if (document.querySelector(".white")!=null){document.querySelector(".white").click()}`, &evalbuf),
+			chromedp.Evaluate(`if(document.querySelector(".navBar_border")!=null){document.querySelector(".navBar_border").style="display:none"}`, &evalbuf),
 			chromedp.Evaluate(`if(document.querySelector(".readerTopBar")!=null){document.querySelector(".readerTopBar").style="display:none"}`, &evalbuf),
 			chromedp.Evaluate(`if(document.querySelector(".readerControls")!=null){document.querySelector(".readerControls").style="display:none"}`, &evalbuf),
 			chromedp.Evaluate(`if(document.querySelector(".readerFooter_button")!=null){document.querySelector(".readerFooter_button").style="display:none"}`, &evalbuf),
@@ -448,9 +449,9 @@ func screenshotPage(ctx context.Context) (image.Image, error) {
 		if err := chromedp.Run(ctx,
 			chromedp.Evaluate(isScrollTailScript, &boolbuf),
 			chromedp.Evaluate(fmt.Sprint(`window.scrollTo(0,`, scroll_height, `)`), &evalbuf),
+			chromedp.Sleep(600*time.Millisecond),
 			chromedp.Evaluate(`document.body.clientHeight `, &height),
 			chromedp.Screenshot(`.app_content`, &buf),
-			chromedp.Sleep(500*time.Millisecond),
 		); err != nil {
 			retry++
 			if retry >= retryMax {
