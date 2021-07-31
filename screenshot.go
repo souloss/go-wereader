@@ -320,7 +320,7 @@ func getBookMeta(ctx context.Context) (string, string, string, int, bool) {
 		lock = true
 		return title, keywords, description, pageCount, lock
 	}
-	log.Println("page count is:", pageCount)
+	log.Println("page metainfo is:", title, keywords, description, pageCount, lock)
 	return title, keywords, description, pageCount, lock
 }
 
@@ -340,20 +340,22 @@ func getBook(ctx context.Context, url string, cookie string) error {
 	// get Book metainfo
 	title, keywords, description, pageCount, lock := getBookMeta(ctx)
 	if lock {
-		log.Println("书籍《", title, "》还未解锁，进行跳过!")
+		log.Println(`书籍《`, title, `》还未解锁，进行跳过!`)
 		return nil
 	}
 	os.MkdirAll(title, os.ModePerm)
-	metafile, _ := os.Create(fmt.Sprint(title, "/", "meta.txt"))
+	metafile, _ := os.Create(fmt.Sprint(title, `/`, `meta.txt`))
 	defer metafile.Close()
 	metafile.WriteString(fmt.Sprint(`{"title":"`, title, `","keywords":"`, keywords, `","description":"`, description, `"}`))
 
 	// get page
 	for i := 1; i < pageCount+1; i++ {
 
-		if _, err := os.Stat(fmt.Sprint(title, "/", i, ".png")); err == nil {
-			fmt.Println("书籍 《", title, "》 第", i, "页已存在，进行跳过!")
+		if _, err := os.Stat(fmt.Sprint(title, `/`, i, `.png`)); err == nil {
+			log.Println(`书籍 《`, title, `》 第`, i, `页已存在，进行跳过!`)
 			continue
+		} else {
+			log.Println(`开始书籍《`, title, `》第`, i, `页的截取`)
 		}
 		// 选择章节并且初始化页面
 	savepage:
@@ -416,7 +418,7 @@ func screenshotPage(ctx context.Context) (image.Image, error) {
 		); err != nil {
 			retry++
 			if retry >= retryMax {
-				return nil, errors.New("The screenshot of the page exceeds the maximum number of retries")
+				return nil, errors.New("the screenshot of the page exceeds the maximum number of retries")
 			}
 			log.Println(err)
 			continue
@@ -425,7 +427,7 @@ func screenshotPage(ctx context.Context) (image.Image, error) {
 		if err := ioutil.WriteFile(fmt.Sprint(dir, "/", scroll_height, ".png"), buf, 0o644); err != nil {
 			retry++
 			if retry >= retryMax {
-				return nil, errors.New("The save of the page exceeds the maximum number of retries")
+				return nil, errors.New("the save of the page exceeds the maximum number of retries")
 			}
 			log.Println(err)
 		} else {
