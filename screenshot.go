@@ -108,7 +108,7 @@ func worker(id int, tasks chan string, idle chan struct{}) {
 		<-idle
 		log.Println("worker", id, "started  job", j)
 		_, taskCtx, cancel1, cancel2 := NewBrowerCtx(true)
-		getBook(taskCtx, j, cookie)
+		GetBook(taskCtx, j, cookie)
 		cancel1()
 		cancel2()
 		log.Println("worker", id, "finished job", j)
@@ -271,7 +271,7 @@ func setCookies(ctx context.Context, urlStr string, cookies []string) {
 			expr := cdp.TimeSinceEpoch(time.Now().Add(180 * 24 * time.Hour))
 			// add cookies to chrome
 			for i := 0; i < len(cookies); i += 2 {
-				log.Println(cookies[i] + "=" + cookies[i+1])
+				// log.Println(cookies[i] + "=" + cookies[i+1])
 				err := network.SetCookie(cookies[i], cookies[i+1]).
 					WithExpires(&expr).
 					WithDomain(u.Host).
@@ -325,7 +325,7 @@ func getBookMeta(ctx context.Context) (string, string, string, int, bool) {
 }
 
 // 获取书籍
-func getBook(ctx context.Context, url string, cookie string) error {
+func GetBook(ctx context.Context, url string, cookie string) error {
 
 	var evalbuf []byte
 	// .chapterItem_lock 判断
@@ -360,11 +360,12 @@ func getBook(ctx context.Context, url string, cookie string) error {
 		// 选择章节并且初始化页面
 	savepage:
 		if err := chromedp.Run(ctx,
-			chromedp.Query(`.catalog`, chromedp.NodeVisible),
+			// chromedp.Query(`.catalog`, chromedp.NodeVisible),
 			chromedp.Evaluate(`document.querySelector(".catalog").click()`, &evalbuf),
 			chromedp.Click(fmt.Sprint(".readerCatalog_list>li:nth-of-type(", i, ")"), chromedp.NodeNotVisible),
 			chromedp.Sleep(900*time.Millisecond),
 			chromedp.Query(`.app_content`, chromedp.NodeVisible),
+			chromedp.Evaluate(`if (document.querySelector(".white")!=null){document.querySelector(".white").click()}`, &evalbuf),
 			chromedp.Evaluate(`if(document.querySelector(".readerTopBar")!=null){document.querySelector(".readerTopBar").style="display:none"}`, &evalbuf),
 			chromedp.Evaluate(`if(document.querySelector(".readerControls")!=null){document.querySelector(".readerControls").style="display:none"}`, &evalbuf),
 			chromedp.Evaluate(`if(document.querySelector(".readerFooter_button")!=null){document.querySelector(".readerFooter_button").style="display:none"}`, &evalbuf),
@@ -382,7 +383,7 @@ func getBook(ctx context.Context, url string, cookie string) error {
 		if err != nil {
 			return err
 		}
-		file, _ := os.Create(fmt.Sprint(title, "/", i, ".png"))
+		file, _ := os.Create(fmt.Sprint(title, `/`, i, `.png`))
 		png.Encode(file, ret)
 		file.Close()
 	}
@@ -405,6 +406,8 @@ func screenshotPage(ctx context.Context) (image.Image, error) {
 	defer os.RemoveAll(dir)
 	if err != nil {
 		return nil, err
+	} else {
+		log.Println("创建页面临时目录: ", dir)
 	}
 
 	// page screenshot and save
@@ -432,8 +435,8 @@ func screenshotPage(ctx context.Context) (image.Image, error) {
 			log.Println(err)
 		} else {
 			retry = 0
-			scroll_height += height
 			imageFiles = append(imageFiles, fmt.Sprint(dir, "/", scroll_height, ".png"))
+			scroll_height += height
 		}
 	}
 
